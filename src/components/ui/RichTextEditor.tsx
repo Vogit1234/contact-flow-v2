@@ -42,7 +42,7 @@ export default function RichTextEditor({
       
       // Clean up existing instance
       if (quillRef.current) {
-        quillRef.current.off();
+        // quillRef.current.off();
         quillRef.current = null;
       }
       

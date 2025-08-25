@@ -1150,7 +1150,8 @@ export default function Dashboard() {
     </div>
   )}
 </div>
-
+</div>
+</div>
       {/* Add Contact Modal - Only for Edit and Admin users */}
 
       {canEdit() && (
