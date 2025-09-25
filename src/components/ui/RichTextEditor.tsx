@@ -197,7 +197,21 @@ export default function RichTextEditor({
         style={{
           minHeight: `${rows * 24}px`
         }}
+        className="expandable-rich-editor"
       />
+      <style dangerouslySetInnerHTML={{
+        __html: `
+          .expandable-rich-editor .ql-editor {
+            max-height: none !important;
+            min-height: ${rows * 24}px;
+            overflow-y: auto;
+            resize: vertical;
+          }
+          .expandable-rich-editor .ql-container {
+            height: auto !important;
+          }
+        `
+      }} />
     </div>
   );
 }

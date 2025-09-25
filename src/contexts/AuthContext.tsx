@@ -40,10 +40,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const userDoc = await getDoc(doc(db, 'users', user.uid));
     if (userDoc.exists()) {
       const userData = userDoc.data();
+      
+      // Check if user is inactive or deleted
+      if (userData.status === 'Inactive') {
+        // Sign out the user immediately
+        await signOut(auth);
+        throw new Error('Your account has been deactivated. Please contact your administrator.');
+      }
+      
+      if (userData.status === 'Deleted') {
+        // Sign out the user immediately
+        await signOut(auth);
+        throw new Error('Failed to sign in. Please check your credentials.');
+      }
+      
       setUserProfile({
         id: user.uid,
         email: userData.email,
-        name: userData.name,
+        password: userData.password,
         role: userData.role,
         status: userData.status,
         createdAt: userData.createdAt?.toDate() || new Date(),
@@ -67,10 +81,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const userDoc = await getDoc(doc(db, 'users', user.uid));
           if (userDoc.exists()) {
             const userData = userDoc.data();
+            
+            // Check if user is inactive or deleted
+            if (userData.status === 'Inactive' || userData.status === 'Deleted') {
+              // Sign out the user immediately
+              await signOut(auth);
+              setUserProfile(null);
+              return;
+            }
+            
             setUserProfile({
               id: user.uid,
               email: userData.email,
-              name: userData.name,
+              password: userData.password,
               role: userData.role,
               status: userData.status,
               createdAt: userData.createdAt?.toDate() || new Date(),

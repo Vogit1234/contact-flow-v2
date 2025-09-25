@@ -99,16 +99,13 @@ export default function AddContactModal({ open, onOpenChange, editContact, onSav
     }));
   };
 
+
   const handleSave = async () => {
     if (!formData.fullName.trim()) {
       showError("Validation Error", "Full name is required");
       return;
     }
 
-    if (!currentUser) {
-      showError("Authentication Error", "You must be logged in to save contacts");
-      return;
-    }
 
     setLoading(true);
 
@@ -129,7 +126,7 @@ export default function AddContactModal({ open, onOpenChange, editContact, onSav
         website: formData.websiteUrl.trim(),
         address: formData.address.trim(),
         notes: formData.notes || '', // Ensure it's never null/undefined
-        createdBy: currentUser.uid,
+        createdBy: currentUser?.uid || "",
         updatedAt: new Date()
       };
       
@@ -167,14 +164,14 @@ export default function AddContactModal({ open, onOpenChange, editContact, onSav
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl bg-white">
-        <DialogHeader>
+      <DialogContent className="max-w-2xl max-h-[90vh] bg-white flex flex-col">
+        <DialogHeader className="flex-shrink-0">
           <DialogTitle className="text-xl font-semibold text-gray-900">
             {isEditMode ? 'Edit Contact' : 'Add New Contact'}
           </DialogTitle>
         </DialogHeader>
         
-        <div className="space-y-4 py-4">
+        <div className="space-y-4 py-4 overflow-y-auto flex-1 min-h-0">
           {/* Row 1: Full Name and Company */}
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
@@ -312,7 +309,7 @@ export default function AddContactModal({ open, onOpenChange, editContact, onSav
           </div>
         </div>
 
-        <DialogFooter>
+        <DialogFooter className="flex-shrink-0 border-t pt-4 mt-4">
           <Button
             variant="outline"
             onClick={handleCancel}

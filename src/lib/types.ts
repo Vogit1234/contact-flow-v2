@@ -1,9 +1,9 @@
 export interface User {
   id: string;
   email: string;
-  name: string;
+  password: string;
   role: 'Admin' | 'Edit' | 'View';
-  status: 'Active' | 'Inactive';
+  status: 'Active' | 'Inactive' | 'Deleted';
   createdAt: Date;
   updatedAt: Date;
 }

@@ -7,13 +7,15 @@ import AddContactModal from "./AddContactModal";
 import AddUserModal from "./AddUserModal";
 import DeleteContactModal from "./DeleteContactModal";
 import DeleteUserModal from "./DeleteUserModal";
+import DeleteUserConfirmModal from "./DeleteUserConfirmModal";
 import DeleteAllContactsModal from "./DeleteAllContactsModal";
-import { useAuth } from "../contexts/AuthContext";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "../contexts/AuthContext";
 import { useToastContext } from "../contexts/ToastContext";
 import { useIPRestriction } from "../contexts/IPRestrictionContext";
 import { collection, getDocs, query, orderBy, deleteDoc, doc, updateDoc, writeBatch, addDoc } from "firebase/firestore";
-import { db } from "../lib/firebase";
+import { httpsCallable } from "firebase/functions";
+import { db, functions } from "../lib/firebase";
 import type { Contact, User as FirebaseUser } from "../lib/types";
 
 
@@ -46,29 +48,30 @@ export default function Dashboard() {
   const [loadingUsers, setLoadingUsers] = useState(true);
   const [isDeleteUserModalOpen, setIsDeleteUserModalOpen] = useState(false);
   const [deletingUser, setDeletingUser] = useState<FirebaseUser | null>(null);
+  const [isDeleteUserConfirmModalOpen, setIsDeleteUserConfirmModalOpen] = useState(false);
+  const [userToDelete, setUserToDelete] = useState<FirebaseUser | null>(null);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [editingUserRole, setEditingUserRole] = useState("");
+  const [editingUserPassword, setEditingUserPassword] = useState("");
   const [isDeleteAllContactsModalOpen, setIsDeleteAllContactsModalOpen] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [ipRangesText, setIpRangesText] = useState('');
 
   const handleLogout = async () => {
     try {
-      // Navigate immediately, don't wait for logout to complete
-      navigate('/', { replace: true });
       await logout();
+      navigate('/', { replace: true });
       success("Logout Successful", "You have been logged out successfully");
     } catch (error) {
       console.error('Logout failed:', error);
       showError("Logout Error", "There was an error logging out");
-      // If logout fails, still try to navigate
       navigate('/', { replace: true });
     }
   };
 
   const loadContacts = useCallback(async () => {
     if (!currentUser) return;
-
+    
     setLoadingContacts(true);
     try {
       const contactsQuery = query(
@@ -95,7 +98,7 @@ export default function Dashboard() {
 
   const loadUsers = useCallback(async () => {
     if (!currentUser) return;
-
+    
     setLoadingUsers(true);
     try {
       const usersQuery = query(
@@ -110,7 +113,9 @@ export default function Dashboard() {
         updatedAt: doc.data().updatedAt?.toDate() || new Date(),
       })) as FirebaseUser[];
 
-      setUsers(usersData);
+      // Filter out deleted users from the UI
+      const activeUsers = usersData.filter(user => user.status !== 'Deleted');
+      setUsers(activeUsers);
     } catch (error) {
       console.error("Error loading users:", error);
       showError("Load Error", "Failed to load users. Please refresh the page.");
@@ -133,6 +138,14 @@ export default function Dashboard() {
     }
   }, [userProfile, activeTab, canAdmin]);
 
+  // Sync IP ranges text with IP settings
+  useEffect(() => {
+    if (ipSettings?.allowedRanges) {
+      setIpRangesText(ipSettings.allowedRanges.join('\n'));
+    }
+  }, [ipSettings?.allowedRanges]);
+
+
   // Update selected contact when contacts list changes
   useEffect(() => {
     if (selectedContact && contacts.length > 0) {
@@ -146,17 +159,17 @@ export default function Dashboard() {
     }
   }, [contacts, selectedContact]);
 
-  // Sync IP ranges text with IP settings
-  useEffect(() => {
-    if (ipSettings?.allowedRanges) {
-      setIpRangesText(ipSettings.allowedRanges.join('\n'));
-    }
-  }, [ipSettings?.allowedRanges]);
 
-  const filteredContacts = contacts.filter(contact =>
-    contact.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    contact.company.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredContacts = contacts.filter(contact => {
+    const query = searchQuery.toLowerCase();
+    return (
+      contact.name?.toLowerCase().includes(query) ||
+      contact.title?.toLowerCase().includes(query) ||
+      contact.company?.toLowerCase().includes(query) ||
+      contact.address?.toLowerCase().includes(query) ||
+      contact.notes?.toLowerCase().includes(query)
+    );
+  });
 
   const handleEditContact = (contact: Contact) => {
     setEditingContact(contact);
@@ -193,38 +206,80 @@ export default function Dashboard() {
   };
 
 
-  const handleEditUserRole = (userId: string, currentRole: string) => {
+  const handleEditUser = (userId: string, currentRole: string, currentPassword: string) => {
     setEditingUserId(userId);
     setEditingUserRole(currentRole);
+    setEditingUserPassword(currentPassword);
   };
 
-  const handleSaveUserRole = async (userId: string, newRole: string) => {
+  const handleSaveUser = async (userId: string, newRole: string, newPassword: string) => {
     try {
-      await updateDoc(doc(db, "users", userId), {
-        role: newRole,
-        updatedAt: new Date()
-      });
+      const user = users.find(u => u.id === userId);
+      if (!user) return;
 
-      success("Role Updated", "User role has been updated successfully");
+      const updates: { role?: string; updatedAt?: Date } = {};
+      let shouldUpdateFirestore = false;
+      let shouldUpdatePassword = false;
+
+      // Check if role changed
+      if (newRole !== user.role) {
+        updates.role = newRole;
+        shouldUpdateFirestore = true;
+      }
+
+      // Check if password changed
+      if (newPassword !== user.password) {
+        if (newPassword.length < 6) {
+          showError("Validation Error", "Password must be at least 6 characters long");
+          return;
+        }
+        shouldUpdatePassword = true;
+      }
+
+      // Update password using Cloud Function if changed (v2 format)
+      if (shouldUpdatePassword) {
+        const updatePasswordFunction = httpsCallable(functions, 'updateUserPassword');
+        console.log("Updating password for user:", user.email); // Debug log
+        await updatePasswordFunction({ 
+          email: user.email, 
+          newPassword: newPassword 
+        });
+      }
+
+      // Update role in Firestore if changed
+      if (shouldUpdateFirestore) {
+        updates.updatedAt = new Date();
+        await updateDoc(doc(db, "users", userId), updates);
+      }
+
+      success("User Updated", "User has been updated successfully");
 
       // Update the user in the local state
-      setUsers(users.map(user =>
-        user.id === userId
-          ? { ...user, role: newRole as 'Admin' | 'Edit' | 'View', updatedAt: new Date() }
-          : user
+      setUsers(users.map(u =>
+        u.id === userId
+          ? { 
+              ...u, 
+              role: newRole as 'Admin' | 'Edit' | 'View',
+              password: newPassword,
+              updatedAt: new Date() 
+            }
+          : u
       ));
 
       setEditingUserId(null);
       setEditingUserRole("");
+      setEditingUserPassword("");
     } catch (error) {
-      console.error("Error updating user role:", error);
-      showError("Update Failed", "Failed to update user role. Please try again.");
+      console.error("Error updating user:", error);
+      const errorMessage = error instanceof Error ? error.message : "Failed to update user. Please try again.";
+      showError("Update Failed", errorMessage);
     }
   };
 
-  const handleCancelEditRole = () => {
+  const handleCancelEdit = () => {
     setEditingUserId(null);
     setEditingUserRole("");
+    setEditingUserPassword("");
   };
 
   const confirmDeactivateUser = async () => {
@@ -236,7 +291,7 @@ export default function Dashboard() {
         updatedAt: new Date()
       });
 
-      success("User Deactivated", `${deletingUser.name} has been deactivated successfully`);
+      success("User Deactivated", `${deletingUser.email} has been deactivated successfully`);
 
       // Update the user in the local state
       setUsers(users.map(user =>
@@ -299,31 +354,93 @@ export default function Dashboard() {
 
     try {
       const text = await file.text();
+      console.log('Raw CSV text:', text.substring(0, 500)); // Log first 500 chars
       const lines = text.split('\n').filter(line => line.trim());
+      console.log('Total lines found:', lines.length);
+      console.log('First few lines:', lines.slice(0, 3));
 
       if (lines.length < 2) {
         showError("Import Failed", "CSV file must contain headers and at least one contact");
         return;
       }
 
-      // Parse CSV headers
-      const headers = lines[0].split(',').map(header =>
+      // Parse CSV headers - handle quoted values properly
+      const parseCSVRow = (row: string): string[] => {
+        const result = [];
+        let current = '';
+        let inQuotes = false;
+        
+        for (let i = 0; i < row.length; i++) {
+          const char = row[i];
+          const nextChar = row[i + 1];
+          
+          if (char === '"') {
+            if (inQuotes && nextChar === '"') {
+              current += '"';
+              i++; // Skip next quote
+            } else {
+              inQuotes = !inQuotes;
+            }
+          } else if (char === ',' && !inQuotes) {
+            result.push(current.trim());
+            current = '';
+          } else {
+            current += char;
+          }
+        }
+        result.push(current.trim());
+        return result;
+      };
+
+      const headers = parseCSVRow(lines[0]).map(header =>
         header.replace(/^"|"$/g, '').trim().toLowerCase()
       );
+      
+      console.log('Parsed headers:', headers);
 
-      // Expected header mappings
+      // Expected header mappings - support multiple variations
       const headerMap: Record<string, string> = {
         'name': 'name',
+        'full name': 'name',
+        'contact name': 'name',
         'title': 'title',
+        'job title': 'title',
+        'position': 'title',
         'company': 'company',
+        'company name': 'company',
+        'organization': 'company',
         'email': 'email',
+        'email address': 'email',
+        'e-mail': 'email',
         'mobile phone': 'mobilePhone',
+        'mobile': 'mobilePhone',
+        'cell phone': 'mobilePhone',
+        'cell': 'mobilePhone',
+        'phone': 'mobilePhone',
         'work phone': 'workPhone',
+        'office phone': 'workPhone',
+        'business phone': 'workPhone',
         'fax': 'fax',
+        'fax number': 'fax',
         'website': 'website',
+        'website url': 'website',
+        'web site': 'website',
+        'url': 'website',
         'address': 'address',
-        'notes': 'notes'
+        'street address': 'address',
+        'mailing address': 'address',
+        'notes': 'notes',
+        'comments': 'notes',
+        'description': 'notes'
       };
+      
+      console.log('Available header mappings:', Object.keys(headerMap));
+      
+      // Debug header matching
+      headers.forEach(header => {
+        const fieldName = headerMap[header];
+        console.log(`Header "${header}" maps to field "${fieldName}"`);
+      });
 
       // Parse contacts from CSV
       const contacts = [];
@@ -331,7 +448,7 @@ export default function Dashboard() {
 
       for (let i = 1; i < lines.length; i++) {
         try {
-          const values = lines[i].split(',').map(value =>
+          const values = parseCSVRow(lines[i]).map(value =>
             value.replace(/^"|"$/g, '').trim()
           );
 
@@ -346,14 +463,21 @@ export default function Dashboard() {
           // Map CSV columns to contact fields
           headers.forEach((header, index) => {
             const fieldName = headerMap[header];
-            if (fieldName && values[index]) {
-              contact[fieldName] = values[index];
+            const value = values[index];
+            if (fieldName) {
+              contact[fieldName] = value || ''; // Include empty values too
+              if (header === 'website' || fieldName === 'website') {
+                console.log(`Website field debug - Header: "${header}", FieldName: "${fieldName}", Value: "${value}"`);
+              }
             }
           });
 
+          console.log(`Row ${i + 1} contact:`, contact);
+
           // Validate required fields
           if (!contact.name || !contact.email) {
-            errors.push(`Row ${i + 1}: Missing required fields (name, email)`);
+            errors.push(`Row ${i + 1}: Missing required fields (name, email) - got: ${JSON.stringify(contact)}`);
+            console.log(`Row ${i + 1} validation failed:`, { name: contact.name, email: contact.email, headers, values });
             continue;
           }
 
@@ -373,7 +497,10 @@ export default function Dashboard() {
       }
 
       if (contacts.length === 0) {
-        showError("Import Failed", "No valid contacts found in CSV file");
+        const errorDetails = errors.length > 0 ? errors.slice(0, 3).join('; ') : 'Unknown parsing error';
+        showError("Import Failed", `No valid contacts found in CSV file. Errors: ${errorDetails}`);
+        console.log('All errors:', errors);
+        console.log('Headers found:', headers);
         return;
       }
 
@@ -552,7 +679,7 @@ export default function Dashboard() {
 
       success(
         `User ${actionText.charAt(0).toUpperCase() + actionText.slice(1)}`,
-        `${user.name} has been ${actionText} successfully`
+        `${user.email} has been ${actionText} successfully`
       );
 
       // Update the user in the local state
@@ -567,6 +694,54 @@ export default function Dashboard() {
         `${actionText.charAt(0).toUpperCase() + actionText.slice(1).replace('activated', 'Activate').replace('deactivated', 'Deactivate')} Failed`,
         `Failed to ${actionText.replace('activated', 'activate').replace('deactivated', 'deactivate')} user. Please try again.`
       );
+    }
+  };
+
+  const handleDeleteUser = (user: FirebaseUser) => {
+    setUserToDelete(user);
+    setIsDeleteUserConfirmModalOpen(true);
+  };
+
+  const confirmDeleteUser = async () => {
+    if (!userToDelete) return;
+
+    // Validate that we have an email
+    if (!userToDelete.email) {
+      showError("Delete Failed", "User email is missing. Cannot delete user.");
+      return;
+    }
+
+    try {
+      console.log("Deleting user object:", userToDelete); // Debug log
+      console.log("User email specifically:", userToDelete.email); // Debug log
+      console.log("Email type:", typeof userToDelete.email); // Debug log
+      
+      // Ensure email is a string and not empty
+      const emailToDelete = String(userToDelete.email || '').trim();
+      if (!emailToDelete) {
+        showError("Delete Failed", "User email is empty or invalid.");
+        return;
+      }
+      
+      // Call the deleteUser Cloud Function with explicit data structure (v2 format)
+      const deleteUserFunction = httpsCallable(functions, 'deleteUser');
+      console.log("Sending data to Cloud Function:", { email: emailToDelete }); // Debug log
+      
+      const result = await deleteUserFunction({ email: emailToDelete });
+      console.log("Delete user result:", result.data); // Debug log
+
+      success("User Deleted", `${userToDelete.email} has been permanently deleted from both Firestore and Firebase Auth.`);
+
+      // Remove the user from the local state (hide from UI)
+      setUsers(users.filter(u => u.id !== userToDelete.id));
+
+      // Reset state
+      setUserToDelete(null);
+      setIsDeleteUserConfirmModalOpen(false);
+    } catch (error) {
+      console.error("Error deleting user:", error);
+      const errorMessage = error instanceof Error ? error.message : "Failed to delete user. Please try again.";
+      showError("Delete Failed", errorMessage);
     }
   };
 
@@ -590,7 +765,7 @@ export default function Dashboard() {
               <div className="flex items-center space-x-2">
                 <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center">
                   <span className="text-white text-sm font-medium">
-                    {userProfile?.name?.charAt(0) || 'U'}
+                    {userProfile?.email?.charAt(0)?.toUpperCase() || 'U'}
                   </span>
                 </div>
                 <span className="text-sm text-gray-700">{userProfile?.email || 'User'}</span>
@@ -894,7 +1069,7 @@ export default function Dashboard() {
                       <thead>
                         <tr className="border-b">
                           <th className="text-left py-3 px-4 font-medium text-gray-500">Email</th>
-                          <th className="text-left py-3 px-4 font-medium text-gray-500">Name</th>
+                          <th className="text-left py-3 px-4 font-medium text-gray-500">Password</th>
                           <th className="text-left py-3 px-4 font-medium text-gray-500">Role</th>
                           <th className="text-left py-3 px-4 font-medium text-gray-500">Status</th>
                           <th className="text-left py-3 px-4 font-medium text-gray-500">Created</th>
@@ -918,7 +1093,21 @@ export default function Dashboard() {
                           users.map((user) => (
                             <tr key={user.id} className="border-b hover:bg-gray-50">
                               <td className="py-3 px-4 text-gray-900">{user.email}</td>
-                              <td className="py-3 px-4 text-gray-900">{user.name}</td>
+                              <td className="py-3 px-4">
+                                {editingUserId === user.id ? (
+                                  <div className="flex items-center space-x-2">
+                                    <input
+                                      type="text"
+                                      value={editingUserPassword}
+                                      onChange={(e) => setEditingUserPassword(e.target.value)}
+                                      className="h-8 w-32 rounded-md border border-input bg-background px-3 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                                      placeholder="Enter password"
+                                    />
+                                  </div>
+                                ) : (
+                                  <span className="text-gray-900 font-mono">{user.password}</span>
+                                )}
+                              </td>
                               <td className="py-3 px-4">
                                 {editingUserId === user.id ? (
                                   <div className="flex items-center space-x-2">
@@ -952,7 +1141,7 @@ export default function Dashboard() {
                                   <div className="flex items-center space-x-2">
                                     <Button
                                       size="sm"
-                                      onClick={() => handleSaveUserRole(user.id, editingUserRole)}
+                                      onClick={() => handleSaveUser(user.id, editingUserRole, editingUserPassword)}
                                       className="bg-blue-600 hover:bg-blue-700 text-white text-xs px-3 py-1"
                                     >
                                       Save
@@ -960,7 +1149,7 @@ export default function Dashboard() {
                                     <Button
                                       size="sm"
                                       variant="outline"
-                                      onClick={handleCancelEditRole}
+                                      onClick={handleCancelEdit}
                                       className="text-xs px-3 py-1"
                                     >
                                       Cancel
@@ -971,7 +1160,7 @@ export default function Dashboard() {
                                     <Button
                                       variant="ghost"
                                       size="icon"
-                                      onClick={() => handleEditUserRole(user.id, user.role)}
+                                      onClick={() => handleEditUser(user.id, user.role, user.password)}
                                     >
                                       <Edit className="w-4 h-4" />
                                     </Button>
@@ -991,6 +1180,15 @@ export default function Dashboard() {
                                       ) : (
                                         <UserCheck className="w-4 h-4" />
                                       )}
+                                    </Button>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="text-red-600 hover:text-red-700"
+                                      onClick={() => handleDeleteUser(user)}
+                                      title="Delete User"
+                                    >
+                                      <Trash2 className="w-4 h-4" />
                                     </Button>
                                   </div>
                                 )}
@@ -1156,78 +1354,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Data Management Section */}
-      <div className="bg-white rounded-lg border p-6">
-        <div className="flex items-center space-x-2 mb-4">
-          <Database className="w-5 h-5 text-gray-600" />
-          <h2 className="text-xl font-semibold text-gray-900">Data Management</h2>
-        </div>
-        <p className="text-gray-600 mb-6">Import, export, and manage contact data in bulk</p>
-        <div className="grid md:grid-cols-3 gap-6">
-          {/* Add Dummy Contacts */}
-          <div className="space-y-3">
-            <h3 className="text-lg font-medium text-gray-900">Add Sample Data</h3>
-            <p className="text-sm text-gray-500">Add 3 dummy contacts for testing</p>
-            <Button
-              className="w-full bg-purple-600 hover:bg-purple-700 text-white"
-              onClick={addDummyContacts}
-            >
-              <Plus className="w-4 h-4 mr-2" />
-              Add Dummy Contacts
-            </Button>
-          </div>
-
-          {/* Import Contacts */}
-          <div className="space-y-4">
-            <h3 className="text-lg font-medium text-gray-900">Import Contacts</h3>
-            <p className="text-sm text-gray-500">Upload CSV file with contact data</p>
-            <div className="relative">
-              <input
-                type="file"
-                accept=".csv"
-                onChange={handleImportCSV}
-                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                disabled={isImporting}
-              />
-              <Button
-                className="w-full bg-green-600 hover:bg-green-700 text-white"
-                disabled={isImporting}
-              >
-                <Upload className="w-4 h-4 mr-2" />
-                {isImporting ? "Importing..." : "Choose File"}
-              </Button>
-            </div>
-          </div>
-
-          {/* Export Contacts */}
-          <div className="space-y-4">
-            <h3 className="text-lg font-medium text-gray-900">Export Contacts</h3>
-            <p className="text-sm text-gray-500">Download all contacts as CSV</p>
-            <Button
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white"
-              onClick={exportContactsToCSV}
-            >
-              <Download className="w-4 h-4 mr-2" />
-              Export CSV
-            </Button>
-          </div>
-
-          {/* Delete All Contacts */}
-          <div className="space-y-4">
-            <h3 className="text-lg font-medium text-gray-900 text-red-600">Delete All Contacts</h3>
-            <p className="text-sm text-gray-500">Permanently remove all contacts</p>
-            <Button
-              className="w-full bg-red-600 hover:bg-red-700 text-white"
-              onClick={handleDeleteAllContacts}
-            >
-              <Trash2 className="w-4 h-4 mr-2" />
-              Delete All
-            </Button>
-          </div>
-        </div>
-      </div>
-  
-
       {/* Add Contact Modal - Only for Edit and Admin users */}
 
       {canEdit() && (
@@ -1272,7 +1398,7 @@ export default function Dashboard() {
         <DeleteUserModal
           open={isDeleteUserModalOpen}
           onOpenChange={setIsDeleteUserModalOpen}
-          userName={deletingUser?.name || ""}
+          userName={deletingUser?.email || ""}
           userEmail={deletingUser?.email || ""}
           onConfirm={confirmDeactivateUser}
         />
@@ -1288,6 +1414,17 @@ export default function Dashboard() {
         />
       )}
 
+      {/* Delete User Confirmation Modal - Only for Admin users */}
+      {canAdmin() && (
+        <DeleteUserConfirmModal
+          open={isDeleteUserConfirmModalOpen}
+          onOpenChange={setIsDeleteUserConfirmModalOpen}
+          userName={userToDelete?.email || ""}
+          userEmail={userToDelete?.email || ""}
+          onConfirm={confirmDeleteUser}
+        />
+      )}
+
     </>
 
 
@@ -1295,4 +1432,5 @@ export default function Dashboard() {
 
 
 };
+
 

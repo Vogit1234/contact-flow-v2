@@ -28,6 +28,8 @@ export default function Login() {
     );
   }
 
+
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
@@ -44,7 +46,23 @@ export default function Login() {
       navigate('/dashboard');
     } catch (error: any) {
       console.error("Login error:", error);
-      showError("Login Failed", "Failed to sign in. Please check your credentials.");
+      
+      // Check for specific error messages
+      let errorMessage = "Failed to sign in. Please check your credentials.";
+      
+      if (error.message?.includes('deactivated') || error.message?.includes('deleted')) {
+        errorMessage = error.message;
+      } else if (error.code === 'auth/user-not-found') {
+        errorMessage = "No account found with this email address.";
+      } else if (error.code === 'auth/wrong-password') {
+        errorMessage = "Incorrect password. Please try again.";
+      } else if (error.code === 'auth/invalid-email') {
+        errorMessage = "Please enter a valid email address.";
+      } else if (error.code === 'auth/too-many-requests') {
+        errorMessage = "Too many failed attempts. Please try again later.";
+      }
+      
+      showError("Login Failed", errorMessage);
     } finally {
       setLoading(false);
     }

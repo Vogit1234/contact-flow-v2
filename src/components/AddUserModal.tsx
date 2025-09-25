@@ -3,7 +3,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { createUserWithEmailAndPassword, getAuth } from "firebase/auth";
-import { doc, setDoc } from "firebase/firestore";
+import { doc, setDoc, collection, query, where, getDocs, updateDoc } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { initializeApp, deleteApp } from "firebase/app";
 import { useAuth } from "../contexts/AuthContext";
@@ -17,7 +17,6 @@ interface AddUserModalProps {
 
 interface UserFormData {
   email: string;
-  fullName: string;
   role: string;
   password: string;
 }
@@ -28,7 +27,6 @@ export default function AddUserModal({ open, onOpenChange, onSave }: AddUserModa
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState<UserFormData>({
     email: "",
-    fullName: "",
     role: "View",
     password: ""
   });
@@ -43,8 +41,8 @@ export default function AddUserModal({ open, onOpenChange, onSave }: AddUserModa
   };
 
   const handleSave = async () => {
-    if (!formData.email.trim() || !formData.fullName.trim() || !formData.password.trim()) {
-      showError("Validation Error", "Email, full name, and password are required");
+    if (!formData.email.trim() || !formData.password.trim()) {
+      showError("Validation Error", "Email and password are required");
       return;
     }
 
@@ -53,16 +51,53 @@ export default function AddUserModal({ open, onOpenChange, onSave }: AddUserModa
       return;
     }
 
-    if (!currentUser) {
-      showError("Authentication Error", "You must be logged in to add users");
-      return;
-    }
 
     setLoading(true);
 
     let secondaryApp = null;
     
     try {
+      // First check if a user with this email already exists (including deleted ones)
+      const existingUserQuery = query(
+        collection(db, "users"),
+        where("email", "==", formData.email.trim().toLowerCase())
+      );
+      const existingUserSnapshot = await getDocs(existingUserQuery);
+      
+      if (!existingUserSnapshot.empty) {
+        const existingUser = existingUserSnapshot.docs[0];
+        const existingUserData = existingUser.data();
+        
+        // If user exists and is deleted, reactivate them
+        if (existingUserData.status === 'Deleted') {
+          await updateDoc(doc(db, "users", existingUser.id), {
+            status: "Active",
+            role: formData.role,
+            password: formData.password.trim(),
+            updatedAt: new Date(),
+            reactivatedAt: new Date(),
+            reactivatedBy: currentUser?.uid || ""
+          });
+          
+          success("User Reactivated", `User ${formData.email} has been reactivated successfully`);
+          
+          // Reset form
+          setFormData({
+            email: "",
+            role: "View",
+            password: ""
+          });
+
+          onSave?.();
+          onOpenChange(false);
+          return;
+        } else {
+          // User exists and is not deleted
+          showError("User Exists", "A user with this email address already exists and is active.");
+          return;
+        }
+      }
+      
       // Create a secondary Firebase app instance to avoid logging out the current admin
       secondaryApp = initializeApp({
         apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -85,24 +120,23 @@ export default function AddUserModal({ open, onOpenChange, onSave }: AddUserModa
       console.log("Creating user profile in Firestore...");
       await setDoc(doc(db, "users", newUser.uid), {
         email: formData.email.trim(),
-        name: formData.fullName.trim(),
+        password: formData.password.trim(),
         role: formData.role,
         status: "Active",
         createdAt: new Date(),
         updatedAt: new Date(),
-        createdBy: currentUser.uid
+        createdBy: currentUser?.uid || ""
       });
       console.log("User profile created successfully");
 
       // Clean up secondary auth (but don't wait for it to avoid timing issues)
       secondaryAuth.signOut().catch(console.error);
 
-      success("User Added", `${formData.fullName} has been added successfully`);
+      success("User Added", `User ${formData.email} has been added successfully`);
       
       // Reset form
       setFormData({
         email: "",
-        fullName: "",
         role: "View",
         password: ""
       });
@@ -114,7 +148,7 @@ export default function AddUserModal({ open, onOpenChange, onSave }: AddUserModa
       let errorMessage = "Failed to add user. Please try again.";
       
       if (error.code === 'auth/email-already-in-use') {
-        errorMessage = "This email is already registered.";
+        errorMessage = "This email is already registered in Firebase Auth. The user may have been previously deleted. Try using the same email again to reactivate the account.";
       } else if (error.code === 'auth/invalid-email') {
         errorMessage = "Please enter a valid email address.";
       } else if (error.code === 'auth/weak-password') {
@@ -140,7 +174,6 @@ export default function AddUserModal({ open, onOpenChange, onSave }: AddUserModa
     // Reset form
     setFormData({
       email: "",
-      fullName: "",
       role: "View",
       password: ""
     });
@@ -169,20 +202,6 @@ export default function AddUserModal({ open, onOpenChange, onSave }: AddUserModa
               required
               autoComplete="off"
               data-lpignore="true"
-            />
-          </div>
-
-          {/* Full Name */}
-          <div className="space-y-2">
-            <label htmlFor="fullName" className="text-sm font-medium text-gray-900">
-              Full Name *
-            </label>
-            <Input
-              id="fullName"
-              value={formData.fullName}
-              onChange={handleInputChange('fullName')}
-              className="w-full"
-              required
             />
           </div>
 
