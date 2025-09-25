@@ -113,7 +113,7 @@ export default function Dashboard() {
     try {
       const contactsQuery = query(
         collection(db, "contacts"),
-        orderBy("createdAt", "desc")
+        orderBy("name", "asc")
       );
       const querySnapshot = await getDocs(contactsQuery);
       const contactsData: Contact[] = querySnapshot.docs.map((doc) => ({
@@ -142,7 +142,7 @@ export default function Dashboard() {
     try {
       const usersQuery = query(
         collection(db, "users"),
-        orderBy("createdAt", "desc")
+        orderBy("email", "asc")
       );
       const querySnapshot = await getDocs(usersQuery);
       const usersData: FirebaseUser[] = querySnapshot.docs.map((doc) => ({
