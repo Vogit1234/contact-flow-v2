@@ -642,6 +642,31 @@ export default function Dashboard() {
         return;
       }
 
+      // Helper function to strip HTML tags and convert to plain text while preserving line breaks
+      const stripHtmlTags = (html: string): string => {
+        if (!html) return "";
+
+        // Replace paragraph tags with newlines
+        let text = html.replace(/<\/p>/gi, "\n").replace(/<p[^>]*>/gi, "");
+
+        // Replace line break tags with newlines
+        text = text.replace(/<br[^>]*>/gi, "\n");
+
+        // Remove all remaining HTML tags
+        text = text.replace(/<[^>]*>/g, "");
+
+        // Decode HTML entities
+        const tempDiv = document.createElement("div");
+        tempDiv.innerHTML = text;
+        text = tempDiv.textContent || tempDiv.innerText || "";
+
+        // Clean up excessive newlines (more than 2 consecutive)
+        text = text.replace(/\n{3,}/g, "\n\n");
+
+        // Trim whitespace
+        return text.trim();
+      };
+
       // Define CSV headers
       const headers = [
         "Name",
@@ -668,11 +693,13 @@ export default function Dashboard() {
         contact.fax || "",
         contact.website || "",
         contact.address || "",
-        contact.notes || "",
+        stripHtmlTags(contact.notes || ""),
         contact.createdAt
           ? new Date(contact.createdAt).toLocaleDateString()
           : "",
       ]);
+
+      console.log("CSV Data Preview:", csvData);
 
       // Combine headers and data
       const allData = [headers, ...csvData];
